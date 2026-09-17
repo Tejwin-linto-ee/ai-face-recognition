@@ -1,8 +1,8 @@
-"""High-performance Face Detection Engine using SCRFD & YOLOv8-Face via ONNX Runtime.
+"""High-performance Face Detection Engine using SCRFD & YuNet via ONNX Runtime.
 
 Configures dynamic hardware acceleration via CUDAExecutionProvider when an
 NVIDIA GPU is present, falling back to an optimized CPUExecutionProvider
-with thread pooling suitable for low-power edge laptops.
+or OpenCV FaceDetectorYN ONNX engine.
 """
 from __future__ import annotations
 
@@ -78,7 +78,6 @@ class SCRFDDetector(BaseFaceDetector):
         self.nms_threshold = nms_threshold
         self.input_size = input_size
 
-        # Execution Provider selection
         available = ort.get_available_providers()
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in available else ["CPUExecutionProvider"]
 
@@ -99,7 +98,6 @@ class SCRFDDetector(BaseFaceDetector):
         orig_h, orig_w = image_bgr.shape[:2]
         target_w, target_h = self.input_size
 
-        # Letterbox resize maintaining aspect ratio
         scale = min(target_w / orig_w, target_h / orig_h)
         new_w, new_h = int(orig_w * scale), int(orig_h * scale)
         resized = cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
@@ -107,15 +105,12 @@ class SCRFDDetector(BaseFaceDetector):
         padded = np.zeros((target_h, target_w, 3), dtype=np.uint8)
         padded[:new_h, :new_w] = resized
 
-        # Normalization for SCRFD: (x - 127.5) / 128.0
         blob = cv2.dnn.blobFromImage(padded, 1.0 / 128.0, (target_w, target_h), (127.5, 127.5, 127.5), swapRB=True)
-
         outputs = self.session.run(self.output_names, {self.input_name: blob})
 
         scores_list = []
         bboxes_list = []
 
-        # Parse outputs per stride
         for idx, stride in enumerate(self._feat_stride_fpn):
             score = outputs[idx]
             bbox = outputs[idx + self.fmc] * stride
@@ -142,7 +137,6 @@ class SCRFDDetector(BaseFaceDetector):
             y2 = anchor_centers[:, 1] + bbox[:, 3]
 
             boxes = np.stack([x1, y1, x2, y2], axis=-1)
-
             scores_list.append(score.flatten())
             bboxes_list.append(boxes)
 
@@ -157,7 +151,6 @@ class SCRFDDetector(BaseFaceDetector):
 
         for k in keep:
             x1, y1, x2, y2 = all_bboxes[k]
-            # Rescale coordinates to original image dimensions
             x1 = max(0, int(round(x1 / scale)))
             y1 = max(0, int(round(y1 / scale)))
             x2 = min(orig_w, int(round(x2 / scale)))
@@ -169,38 +162,42 @@ class SCRFDDetector(BaseFaceDetector):
         return results
 
 
-class YuNetFallbackDetector(BaseFaceDetector):
-    """OpenCV YuNet face detector fallback when an external ONNX weights file is pending."""
+class YuNetDetector(BaseFaceDetector):
+    """Direct OpenCV FaceDetectorYN engine using preloaded ONNX model."""
 
-    def __init__(self, conf_threshold: float = 0.60, nms_threshold: float = 0.45) -> None:
+    def __init__(self, conf_threshold: float = 0.50, nms_threshold: float = 0.40) -> None:
         self.conf_threshold = conf_threshold
         self.nms_threshold = nms_threshold
-        self.active_provider = "CPU (OpenCV DNN YuNet)"
+        self.model_path = os.path.expanduser("~/.deepface/weights/face_detection_yunet_2023mar.onnx")
+        self.active_provider = "CPU (OpenCV FaceDetectorYN)"
         self._detector = None
         self._current_size = (0, 0)
 
-    def _get_detector(self, width: int, height: int):
-        if self._detector is None or self._current_size != (width, height):
-            # Locate or create YuNet model via OpenCV
-            model_path = ""
-            # OpenCV provides cv2.FaceDetectorYN
-            try:
+    def detect(self, image_bgr: np.ndarray) -> List[Tuple[Tuple[int, int, int, int], float]]:
+        h, w = image_bgr.shape[:2]
+        if self._detector is None or self._current_size != (w, h):
+            if os.path.isfile(self.model_path):
                 self._detector = cv2.FaceDetectorYN.create(
-                    model="",
-                    config="",
-                    input_size=(width, height),
+                    self.model_path, "", (w, h),
                     score_threshold=self.conf_threshold,
                     nms_threshold=self.nms_threshold,
                     top_k=20,
                 )
-                self._current_size = (width, height)
-            except Exception:
-                self._detector = None
-        return self._detector
+                self._current_size = (w, h)
 
-    def detect(self, image_bgr: np.ndarray) -> List[Tuple[Tuple[int, int, int, int], float]]:
-        h, w = image_bgr.shape[:2]
-        # Fallback to DeepFace/YuNet or OpenCV DNN
+        if self._detector is not None:
+            _, faces = self._detector.detect(image_bgr)
+            if faces is None:
+                return []
+            results = []
+            for f in faces:
+                x, y, bw, bh = int(f[0]), int(f[1]), int(f[2]), int(f[3])
+                score = float(f[14])
+                if score >= self.conf_threshold and bw > 15 and bh > 15:
+                    results.append(((max(0, x), max(0, y), bw, bh), score))
+            return results
+
+        # Fallback to DeepFace extract_faces if ONNX not found
         try:
             from deepface import DeepFace
             faces = DeepFace.extract_faces(
@@ -224,11 +221,10 @@ class YuNetFallbackDetector(BaseFaceDetector):
 
 def create_face_detector(
     model_path: Path | str | None = None,
-    conf_threshold: float = 0.55,
-    nms_threshold: float = 0.45,
+    conf_threshold: float = 0.50,
+    nms_threshold: float = 0.40,
     cpu_threads: int = 2,
 ) -> BaseFaceDetector:
-    """Factory creating an SCRFD ONNX detector if model exists, with fallback."""
     if model_path and Path(model_path).is_file() and ort is not None:
         try:
             detector = SCRFDDetector(
@@ -242,6 +238,6 @@ def create_face_detector(
         except Exception as exc:
             print(f"[Detector] Could not load ONNX model ({exc}); falling back.")
 
-    detector = YuNetFallbackDetector(conf_threshold=conf_threshold, nms_threshold=nms_threshold)
+    detector = YuNetDetector(conf_threshold=conf_threshold, nms_threshold=nms_threshold)
     print(f"[Detector] Using YuNet engine ({detector.active_provider})")
     return detector

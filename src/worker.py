@@ -103,7 +103,7 @@ class BiometricInferenceProcess(mp.Process):
                     self.result_queue.put(
                         InferenceResponse(
                             task_type="detect",
-                            result=detections,
+                            result=(detections, task.payload),
                             frame_id=task.frame_id,
                         )
                     )

@@ -58,6 +58,9 @@ def main() -> None:
     latest_box = None
     message = "Single face only. Press SPACE to capture sample. Press 'q' to complete."
 
+    auto_mode = False
+    last_auto_capture_time = 0.0
+
     try:
         while True:
             ok, frame = camera.read()
@@ -65,6 +68,7 @@ def main() -> None:
                 break
             frame = cv2.flip(frame, 1)
             frame_count += 1
+            now = time.monotonic()
 
             if frame_count % 4 == 0:
                 try:
@@ -74,34 +78,49 @@ def main() -> None:
                         latest_box = None
                     elif len(dets) == 1:
                         latest_box = dets[0][0]
-                        message = "Alignment good. Press SPACE to record sample."
+                        if auto_mode:
+                            message = "AUTO-CAPTURE ACTIVE: slowly move head left/right/smile."
+                        else:
+                            message = "Alignment good. Press SPACE or 'A' (Auto-Capture 50-100 photos)."
                     else:
                         latest_box = None
                         message = "Center face in scanner view with good illumination."
                 except Exception as exc:
                     message = f"Detector error: {exc}"
 
+            # Auto-capture logic (every 0.25s while face is visible)
+            trigger_save = False
+            if auto_mode and latest_box is not None and (now - last_auto_capture_time >= 0.22) and saved < args.target:
+                trigger_save = True
+                last_auto_capture_time = now
+
             if latest_box is not None:
                 x, y, w, h = latest_box
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 220, 0), 2)
+                box_color = (0, 255, 255) if auto_mode else (0, 220, 0)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
 
             # Banner overlay
+            mode_badge = " [AUTO-BURST ON]" if auto_mode else " [SPACE / 'A' Auto]"
             cv2.rectangle(frame, (0, 0), (frame.shape[1], 70), (20, 20, 20), -1)
-            cv2.putText(frame, f"User ID: {args.name} | Samples: {saved}/{args.target}", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, f"User ID: {args.name} | Samples: {saved}/{args.target}{mode_badge}", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 0), 2, cv2.LINE_AA)
             cv2.putText(frame, message, (16, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (235, 235, 235), 1, cv2.LINE_AA)
             cv2.imshow(window_name, frame)
 
             key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):
+            if key in (ord("q"), 27) or saved >= args.target:
                 break
-            if key == ord(" ") and latest_box is not None:
+            if key in (ord("a"), ord("A")):
+                auto_mode = not auto_mode
+            if key == ord(" "):
+                trigger_save = True
+
+            if trigger_save and latest_box is not None:
                 x, y, w, h = latest_box
                 crop = padded_crop(frame, {"x": x, "y": y, "w": w, "h": h})
                 if crop is not None:
                     filename = destination / f"enroll_{int(time.time() * 1000)}.jpg"
                     cv2.imwrite(str(filename), crop)
                     saved += 1
-                    message = f"Recorded sample {saved}. Vary head angle or expression slightly."
     finally:
         camera.release()
         cv2.destroyAllWindows()

@@ -372,6 +372,8 @@ def main() -> None:
             frame_number += 1
             now = time.monotonic()
 
+            detection_updated = False
+
             # 1. Drain background worker responses
             while True:
                 try:
@@ -380,9 +382,21 @@ def main() -> None:
                     break
 
                 if response.task_type == "detect":
-                    # Update ByteTrack with fresh detections
+                    # Rescale detections to native camera resolution and update ByteTrack
+                    detection_updated = True
                     if response.result is not None:
-                        active_tracks = tracker.update(response.result)
+                        dets_raw, payload = response.result
+                        if payload is not None and dets_raw:
+                            orig_w, orig_h, det_w, det_h = payload
+                            sx = orig_w / float(det_w)
+                            sy = orig_h / float(det_h)
+                            scaled_dets = [
+                                ((int(round(b[0] * sx)), int(round(b[1] * sy)), int(round(b[2] * sx)), int(round(b[3] * sy))), score)
+                                for b, score in dets_raw
+                            ]
+                        else:
+                            scaled_dets = dets_raw if dets_raw else []
+                        active_tracks = tracker.update(scaled_dets)
                     else:
                         active_tracks = []
 
@@ -394,6 +408,7 @@ def main() -> None:
                         q_score = state.quality.score if state.quality else 0.50
                         matched_user, match_score = database.match(response.result, q_score)
                         state.add_match(matched_user, match_score, required_votes=2)
+                        print(f"[Biometric] Scanned face #{response.track_id} -> Matched: {matched_user} (Confidence: {match_score:.2f})")
 
                         # Trigger motion challenge or liveness
                         if state.user_id not in ("Unknown", "Low confidence", "Scanning"):
@@ -410,18 +425,31 @@ def main() -> None:
                         if not is_real:
                             system_audit_log("SPOOF_ATTEMPT", state.user_id, score, "MiniFASNet anti-spoof rejection")
 
+            # If no new detections arrived this frame, advance tracker prediction smoothly
+            if not detection_updated:
+                for t in tracker.tracked_stracks:
+                    t.predict()
+
             # 2. Asynchronous Sampling: Submit detection every 3rd frame
             if frame_number % 3 == 0:
                 try:
-                    # Pass small copy for detection efficiency
-                    h, w = frame.shape[:2]
-                    det_frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
-                    task_queue.put_nowait(InferenceTask(task_type="detect", image=det_frame, frame_id=frame_number))
+                    orig_h, orig_w = frame.shape[:2]
+                    det_w, det_h = 640, 360
+                    det_frame = cv2.resize(frame, (det_w, det_h), interpolation=cv2.INTER_AREA)
+                    task_queue.put_nowait(
+                        InferenceTask(
+                            task_type="detect",
+                            image=det_frame,
+                            payload=(orig_w, orig_h, det_w, det_h),
+                            frame_id=frame_number,
+                        )
+                    )
                 except queue.Full:
                     pass  # Drop frame to keep pipeline synchronous with camera rate
 
             # 3. Retrieve active tracks from ByteTracker
-            active_tracks = [t for t in tracker.tracked_stracks if t.state.name == "TRACKED"]
+            from bytetrack import TrackState
+            active_tracks = [t for t in tracker.tracked_stracks if t.state == TrackState.TRACKED]
 
             # Maintain identity states
             for t in active_tracks:

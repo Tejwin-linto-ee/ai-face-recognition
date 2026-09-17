@@ -1,10 +1,9 @@
 {
   "model": "Facenet512",
   "detector": "retinaface",
-  "embedding_count": 101,
+  "embedding_count": 75,
   "identity_counts": {
-    "Supriya": 51,
-    "Tejwin": 50
+    "Supriya": 75
   },
   "normalization": "L2; cosine similarity is a dot product",
   "quality_filter": "face size, lighting, contrast, and sharpness; dim faces use conservative CLAHE/gamma enhancement"
