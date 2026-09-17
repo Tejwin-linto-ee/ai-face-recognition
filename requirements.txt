@@ -1,0 +1,9 @@
+# Core Deep Learning & Computer Vision
+numpy>=1.23.0,<2.0.0
+opencv-contrib-python>=4.8.0
+tensorflow>=2.15.0
+deepface>=0.0.90
+
+# Optional Voice Guidance & Audio Feedback
+edge-tts>=6.1.0
+pygame>=2.5.0

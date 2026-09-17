@@ -1,0 +1,11 @@
+{
+  "model": "ArcFace",
+  "detector": "retinaface",
+  "embedding_count": 101,
+  "identity_counts": {
+    "Supriya": 51,
+    "Tejwin": 50
+  },
+  "normalization": "L2; cosine similarity is a dot product",
+  "quality_filter": "face size, lighting, contrast, and sharpness; dim faces use conservative CLAHE/gamma enhancement"
+}
