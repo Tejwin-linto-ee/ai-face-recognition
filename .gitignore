@@ -37,9 +37,6 @@ ENV/
 *.swp
 *.swo
 
-# Biometric raw captured face datasets (keep private)
-faces/
-
 # OS specific
 .DS_Store
 Thumbs.db

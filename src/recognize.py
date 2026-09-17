@@ -525,7 +525,7 @@ def main() -> None:
                             terminal_unlocked_until = now + 15.0
                             last_unlocked_user = uid
                             unlock_secure_state(uid, sim)
-                            voice.say("welcome", f"Welcome {uid}. Terminal unlocked.", 12)
+                            voice.say("welcome", f"Welcome {uid}. Access granted.", 12)
                 elif uid == "Low confidence":
                     label_str, box_color = f"LOW CONFIDENCE ({sim:.2f})", (0, 165, 255)
                 elif uid == "Unknown":
@@ -544,11 +544,11 @@ def main() -> None:
             if pin_mode:
                 banner_text, banner_color = f"SECURITY OVERRIDE PIN: {'*' * len(pin_entry)}", (255, 200, 0)
             elif now < terminal_unlocked_until:
-                banner_text, banner_color = f"ACCESS GRANTED - TERMINAL UNLOCKED ({last_unlocked_user})", (0, 220, 0)
+                banner_text, banner_color = f"ACCESS GRANTED - WELCOME {last_unlocked_user.upper()}", (0, 220, 0)
             elif now < pin_notice_until:
                 banner_text, banner_color = pin_notice, (0, 0, 230)
             elif not active_tracks:
-                banner_text, banner_color = "BIOMETRIC SMART HUB - PRESENT FACE TO TERMINAL", (255, 200, 0)
+                banner_text, banner_color = "BIOMETRIC SMART HUB - PRESENT FACE TO SCANNER", (255, 200, 0)
                 voice.say("idle", "Please look at the scanner.", 15)
             else:
                 primary_state = identity_states.get(selected_track_id) if selected_track_id else None
@@ -599,7 +599,7 @@ def main() -> None:
                         terminal_unlocked_until = now + 30.0
                         last_unlocked_user = "OVERRIDE_ADMIN"
                         system_audit_log("PIN_OVERRIDE_SUCCESS", "ADMIN", 1.0, "Security override PIN accepted")
-                        voice.say("pin_ok", "Security override verified. Terminal unlocked.", 2)
+                        voice.say("pin_ok", "Security override verified. Access granted.", 2)
                     else:
                         pin_notice = "ACCESS DENIED - INVALID SECURITY PIN"
                         pin_notice_until = now + 4.0
