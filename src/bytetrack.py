@@ -1,8 +1,8 @@
-"""Pure Python + NumPy implementation of ByteTrack (Zhang et al., 2022).
+"""Pure Python + NumPy implementation of ByteTrack with zero-drift stabilization.
 
-ByteTrack associates both high-confidence and low-confidence detection boxes
-across video frames to maintain persistent track IDs through partial occlusions,
-motion blur, and extreme angles without requiring heavy optical flow.
+Associates high-confidence and low-confidence detection boxes across video frames
+to maintain persistent track IDs through partial occlusions and motion blur
+without runaway velocity drift.
 """
 from __future__ import annotations
 
@@ -43,54 +43,23 @@ def box_iou(boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
     return np.where(union > 0, intersection / union, 0.0)
 
 
-class KalmanBoxTracker:
-    """Kalman filter tracking bounding box state [cx, cy, aspect_ratio, height]."""
-
-    _count = 0
+class SmoothBoxTracker:
+    """Zero-drift bounding box tracker with exponential smoothing."""
 
     def __init__(self, bbox_xywh: Tuple[int, int, int, int]):
-        x, y, w, h = bbox_xywh
-        self.state = np.array([x + w / 2.0, y + h / 2.0, w / max(float(h), 1e-4), float(h), 0, 0, 0, 0], dtype=np.float32)
-        self.covariance = np.eye(8, dtype=np.float32) * 10.0
-        self.covariance[4:, 4:] *= 100.0
+        self.box = np.array(bbox_xywh, dtype=np.float32)
 
     def predict(self) -> None:
-        """Constant-velocity motion model prediction."""
-        dt = 1.0
-        F = np.eye(8, dtype=np.float32)
-        for i in range(4):
-            F[i, i + 4] = dt
-
-        Q = np.eye(8, dtype=np.float32) * 1.0
-        Q[4:, 4:] *= 0.1
-
-        self.state = F @ self.state
-        self.covariance = F @ self.covariance @ F.T + Q
+        """Keep location steady between detection frames with zero velocity drift."""
+        pass
 
     def update(self, bbox_xywh: Tuple[int, int, int, int]) -> None:
-        """Correct state with new detection observation."""
-        x, y, w, h = bbox_xywh
-        z = np.array([x + w / 2.0, y + h / 2.0, w / max(float(h), 1e-4), float(h)], dtype=np.float32)
-
-        H = np.zeros((4, 8), dtype=np.float32)
-        H[:4, :4] = np.eye(4, dtype=np.float32)
-
-        R = np.eye(4, dtype=np.float32) * 1.0
-        R[2, 2] *= 10.0
-
-        y_res = z - (H @ self.state)
-        S = H @ self.covariance @ H.T + R
-        K = self.covariance @ H.T @ np.linalg.inv(S)
-
-        self.state = self.state + (K @ y_res)
-        self.covariance = (np.eye(8, dtype=np.float32) - (K @ H)) @ self.covariance
+        """Update with new detection box using smooth interpolation."""
+        target = np.array(bbox_xywh, dtype=np.float32)
+        self.box = 0.80 * target + 0.20 * self.box
 
     def get_bbox_xywh(self) -> Tuple[int, int, int, int]:
-        """Return estimated [x, y, w, h]."""
-        cx, cy, r, h = self.state[:4]
-        w = r * h
-        x = cx - w / 2.0
-        y = cy - h / 2.0
+        x, y, w, h = self.box
         return int(round(x)), int(round(y)), max(1, int(round(w))), max(1, int(round(h)))
 
     def get_bbox_xyxy(self) -> Tuple[float, float, float, float]:
@@ -104,7 +73,7 @@ class STrack:
     bbox_xywh: Tuple[int, int, int, int]
     score: float
     state: TrackState = TrackState.NEW
-    kalman: KalmanBoxTracker = field(init=False)
+    tracker: SmoothBoxTracker = field(init=False)
     frame_id: int = 0
     tracklet_len: int = 0
     user_id: str = "Scanning"
@@ -115,15 +84,15 @@ class STrack:
     deep_liveness: str = "not checked"
 
     def __post_init__(self):
-        self.kalman = KalmanBoxTracker(self.bbox_xywh)
+        self.tracker = SmoothBoxTracker(self.bbox_xywh)
 
     def predict(self) -> None:
-        self.kalman.predict()
-        self.bbox_xywh = self.kalman.get_bbox_xywh()
+        self.tracker.predict()
+        self.bbox_xywh = self.tracker.get_bbox_xywh()
 
     def update(self, bbox_xywh: Tuple[int, int, int, int], score: float, frame_id: int) -> None:
-        self.kalman.update(bbox_xywh)
-        self.bbox_xywh = self.kalman.get_bbox_xywh()
+        self.tracker.update(bbox_xywh)
+        self.bbox_xywh = self.tracker.get_bbox_xywh()
         self.score = score
         self.frame_id = frame_id
         self.tracklet_len += 1
@@ -142,14 +111,14 @@ class STrack:
 
 
 class ByteTracker:
-    """Robust multi-face association using ByteTrack logic."""
+    """Robust multi-face association using ByteTrack two-stage logic."""
 
     def __init__(
         self,
-        track_thresh: float = 0.50,
-        high_thresh: float = 0.60,
-        match_thresh: float = 0.70,
-        max_lost_frames: int = 30,
+        track_thresh: float = 0.45,
+        high_thresh: float = 0.55,
+        match_thresh: float = 0.35,
+        max_lost_frames: int = 15,
     ) -> None:
         self.track_thresh = track_thresh
         self.high_thresh = high_thresh
@@ -164,16 +133,14 @@ class ByteTracker:
         self.next_id = 1
 
     def update(self, detections: List[Tuple[Tuple[int, int, int, int], float]]) -> List[STrack]:
-        """Update tracks given list of ((x, y, w, h), confidence)."""
         self.frame_id += 1
 
-        # 1. Predict current locations with Kalman Filter
         for track in self.tracked_stracks:
             track.predict()
         for track in self.lost_stracks:
             track.predict()
 
-        # 2. Split detections into high and low confidence sets
+        # 1. Split into high and low confidence detections
         detections_high = []
         detections_low = []
         for box, score in detections:
@@ -182,7 +149,7 @@ class ByteTracker:
             elif score >= self.track_thresh:
                 detections_low.append((box, score))
 
-        # 3. First Association: Match high-confidence detections with active tracks
+        # 2. First Association: Match high-confidence detections with active tracks
         strack_pool = [t for t in self.tracked_stracks if t.state == TrackState.TRACKED] + self.lost_stracks
         matched_tracks_a, unmatched_tracks_a, unmatched_dets_high = self._associate(
             strack_pool, detections_high, iou_thresh=self.match_thresh
@@ -194,16 +161,16 @@ class ByteTracker:
                 self.lost_stracks.remove(track)
                 self.tracked_stracks.append(track)
 
-        # 4. Second Association: Match low-confidence detections with remaining active tracks
+        # 3. Second Association: Match low-confidence detections with remaining tracks
         unmatched_active_tracks = [t for t in unmatched_tracks_a if t.state == TrackState.TRACKED]
         matched_tracks_b, unmatched_tracks_b, _ = self._associate(
-            unmatched_active_tracks, detections_low, iou_thresh=0.50
+            unmatched_active_tracks, detections_low, iou_thresh=0.25
         )
 
         for track, (box, score) in matched_tracks_b:
             track.update(box, score, self.frame_id)
 
-        # 5. Handle remaining unmatched tracks: mark as LOST
+        # 4. Handle remaining unmatched tracks
         for track in unmatched_tracks_b:
             if track.state != TrackState.LOST:
                 track.mark_lost()
@@ -211,7 +178,7 @@ class ByteTracker:
                     self.tracked_stracks.remove(track)
                 self.lost_stracks.append(track)
 
-        # 6. Initialize new tracks from remaining high-confidence detections
+        # 5. Initialize new tracks from unmatched high-confidence detections
         for box, score in unmatched_dets_high:
             new_track = STrack(
                 track_id=self.next_id,
@@ -223,7 +190,7 @@ class ByteTracker:
             self.next_id += 1
             self.tracked_stracks.append(new_track)
 
-        # 7. Remove dead tracks that exceeded max_lost_frames
+        # 6. Clean up dead tracks
         retained_lost = []
         for track in self.lost_stracks:
             if self.frame_id - track.frame_id > self.max_lost_frames:
@@ -233,7 +200,6 @@ class ByteTracker:
                 retained_lost.append(track)
         self.lost_stracks = retained_lost
 
-        # Return all currently active tracks
         return [t for t in self.tracked_stracks if t.state == TrackState.TRACKED]
 
     def _associate(
@@ -254,7 +220,6 @@ class ByteTracker:
         unmatched_track_indices = set(range(len(tracks)))
         unmatched_det_indices = set(range(len(detections)))
 
-        # Greedy association sorted by highest IoU overlap
         candidate_matches = sorted(
             [
                 (ious[t_idx, d_idx], t_idx, d_idx)
